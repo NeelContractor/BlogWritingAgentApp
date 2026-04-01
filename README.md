@@ -3,6 +3,8 @@
 An end-to-end **AI-powered blog generation system** built using **LangGraph + Ollama + Streamlit**.
 It automatically plans, researches (optional), writes, and formats high-quality technical blogs with images.
 
+<img src="https://github.com/NeelContractor/BlogWritingAgentApp/blob/main/demo.png" width="70%" height="70%">
+
 ---
 
 ## Project Strucutre
