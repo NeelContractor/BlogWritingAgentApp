@@ -5,6 +5,21 @@ It automatically plans, researches (optional), writes, and formats high-quality 
 
 ---
 
+## Project Strucutre
+```
+.
+├── backend.py          # Agent pipeline (LangGraph)
+├── frontend.py         # Streamlit frontend
+├── blog_outputs/       # Generated Blog .md files
+│   ├── blog1.pdf
+│   ├── blog2.pdf
+│   └── blog3.pdf
+├── .env
+└── README.md
+```
+
+---
+
 ## Features
 
 * **Smart Routing**
