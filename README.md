@@ -1,2 +1,98 @@
-# Blog Writting Agent
+## AI Blog Writing Agent
 
+An end-to-end **AI-powered blog generation system** built using **LangGraph + Ollama + Streamlit**.
+It automatically plans, researches (optional), writes, and formats high-quality technical blogs with images.
+
+---
+
+## Features
+
+* **Smart Routing**
+
+  * Decides if research is needed (`closed_book`, `hybrid`, `open_book`)
+
+* **Optional Web Research**
+
+  * Uses Tavily API for fresh and relevant content
+
+* **Structured Blog Planning**
+
+  * Generates a full outline (5–7 sections) with goals & word targets
+
+* **Parallel Section Writing**
+
+  * Each section is generated independently using LangGraph workers
+
+* **Auto Image Generation**
+
+  * Creates and embeds images using Gemini (free tier supported)
+
+* **Markdown + HTML Output**
+
+  * Clean blog export with preview UI
+
+* **Persistence**
+
+  * Saves blogs locally and allows reloading past content
+
+---
+
+## Architecture
+
+```
+User Input (Topic)
+        ↓
+     Router
+        ↓
+   Research (optional)
+        ↓
+   Orchestrator (Plan)
+        ↓
+   Fanout → Workers (parallel writing)
+        ↓
+     Reducer (merge + images)
+        ↓
+   Final Blog Output
+```
+
+---
+
+## Tech Stack
+
+* **LangGraph** – workflow orchestration
+* **Ollama** – local LLM
+* **Streamlit** – UI
+* **Gemini API** – image generation
+* **Tavily API** – web search (optional)
+
+---
+
+## Setup
+
+### 1. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Run Ollama
+
+```bash
+ollama run llama3.2:1b
+```
+
+### 3. Set environment variables (optional)
+
+```bash
+export OLLAMA_MODEL=llama3.2:1b
+export TAVILY_API_KEY=your_key        
+export GOOGLE_API_KEY=your_key        # for images
+```
+
+### 4. Run app
+
+```bash
+streamlit run frontend.py
+```
+
+---
