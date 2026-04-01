@@ -113,3 +113,6 @@ streamlit run frontend.py
 ```
 
 ---
+
+## TODO
+* Image generation is not working

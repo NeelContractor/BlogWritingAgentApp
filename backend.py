@@ -17,16 +17,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# =============================================================================
-# Model config
-# Recommended for 8 GB RAM:
-#   llama3.2        (3B  — fast, decent quality)  ← default
-#   mistral         (7B  — better quality, fits ~5 GB)
-#   phi3            (3.8B — good reasoning)
-#   tinyllama       (1B  — low quality, last resort)
-# Override via env:  OLLAMA_MODEL=mistral python app.py
-# =============================================================================
-
 MODEL_NAME = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
 
 # =============================================================================
@@ -532,8 +522,7 @@ def _gemini_generate_image_bytes(prompt: str) -> bytes:
     image_bytes: Optional[bytes] = None
 
     for model_id in [
-        "imagen-3.0-generate-002",
-        "gemini-2.0-flash-preview-image-generation",
+        "gemini-2.5-flash"
     ]:
         try:
             if "imagen" in model_id:
