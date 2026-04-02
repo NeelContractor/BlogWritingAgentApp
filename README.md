@@ -1,7 +1,7 @@
 ## AI Blog Writing Agent
 
 An end-to-end **AI-powered blog generation system** built using **LangGraph + Ollama + Streamlit**.
-It automatically plans, researches (optional), writes, and formats high-quality technical blogs with images.
+It automatically plans, researches (optional), writes, and formats high-quality technical blogs.
 
 <img src="https://github.com/NeelContractor/BlogWritingAgentApp/blob/main/demo.png" width="70%" height="70%">
 
@@ -40,10 +40,6 @@ It automatically plans, researches (optional), writes, and formats high-quality 
 
   * Each section is generated independently using LangGraph workers
 
-* **Auto Image Generation**
-
-  * Creates and embeds images using Gemini (free tier supported)
-
 * **Markdown + HTML Output**
 
   * Clean blog export with preview UI
@@ -67,7 +63,7 @@ User Input (Topic)
         ↓
    Fanout → Workers (parallel writing)
         ↓
-     Reducer (merge + images)
+     Reducer (merge)
         ↓
    Final Blog Output
 ```
@@ -79,8 +75,7 @@ User Input (Topic)
 * **LangGraph** – workflow orchestration
 * **Ollama** – local LLM
 * **Streamlit** – UI
-* **Gemini API** – image generation
-* **Tavily API** – web search (optional)
+* **Tavily API** – web search
 
 ---
 
@@ -103,7 +98,6 @@ ollama run llama3.2:1b
 ```bash
 export OLLAMA_MODEL=llama3.2:1b
 export TAVILY_API_KEY=your_key        
-export GOOGLE_API_KEY=your_key        # for images
 ```
 
 ### 4. Run app
@@ -115,4 +109,4 @@ streamlit run frontend.py
 ---
 
 ## TODO
-* Image generation is not working
+* Add Image generation logic

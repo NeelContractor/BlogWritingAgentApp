@@ -20,6 +20,20 @@ load_dotenv()
 MODEL_NAME = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
 
 # =============================================================================
+# IMAGE GENERATION — COMMENTED OUT
+# To re-enable: uncomment HF_IMAGE_MODEL and the image functions below,
+# then uncomment the image block in reducer_node().
+#
+# HF_IMAGE_MODEL = os.getenv("HF_IMAGE_MODEL", "black-forest-labs/FLUX.1-schnell")
+#
+# Setup when re-enabling:
+#   pip install huggingface_hub pillow
+#   Add to .env (optional, gives higher rate limits):
+#   HF_TOKEN=hf_your_token_here  (Read access only, free at huggingface.co/settings/tokens)
+# =============================================================================
+
+
+# =============================================================================
 # Schemas
 # =============================================================================
 
@@ -75,14 +89,14 @@ class State(TypedDict):
     recency_days: int
     sections: Annotated[List[tuple], operator.add]
     merged_md: str
-    md_with_placeholders: str
-    image_specs: List[dict]
+    # image_specs: List[dict]   # IMAGE GENERATION — commented out
+    # image_errors: List[str]   # IMAGE GENERATION — commented out
     output_dir: str
     final: str
 
 
 # =============================================================================
-# LLM — strip <think> blocks for reasoning models (qwen, deepseek, etc.)
+# LLM helpers
 # =============================================================================
 
 _BASE_LLM = ChatOllama(model=MODEL_NAME, temperature=0.3)
@@ -106,16 +120,7 @@ class _CleanLLM:
 llm = _CleanLLM(_BASE_LLM)
 
 
-# =============================================================================
-# Structured-output helper with JSON fallback
-# Small models often wrap JSON in markdown fences or add preamble — we handle it.
-# =============================================================================
-
 def _invoke_structured(schema, messages, retries: int = 2):
-    """
-    Try with_structured_output first.
-    On failure, fall back to raw-text JSON extraction.
-    """
     try:
         result = llm.with_structured_output(schema).invoke(messages)
         if result is not None:
@@ -124,8 +129,6 @@ def _invoke_structured(schema, messages, retries: int = 2):
         print(f"[structured] with_structured_output failed ({type(e1).__name__}: {e1}), trying raw JSON…")
 
     import json
-
-    # Append an explicit JSON instruction to the last HumanMessage
     from langchain_core.messages import HumanMessage as HM
     msgs = list(messages)
     last = msgs[-1]
@@ -135,10 +138,8 @@ def _invoke_structured(schema, messages, retries: int = 2):
     for attempt in range(retries):
         try:
             raw = llm.invoke(msgs).content.strip()
-            # Strip markdown fences
             raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
             raw = re.sub(r"\s*```\s*$", "", raw, flags=re.MULTILINE)
-            # Find the first { ... } block
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
                 raw = match.group(0)
@@ -193,7 +194,7 @@ def route_next(state: State) -> str:
 
 
 # =============================================================================
-# Research  (Tavily — optional)
+# Research (Tavily — optional)
 # =============================================================================
 
 def _tavily_search(query: str, max_results: int = 5) -> List[dict]:
@@ -327,7 +328,6 @@ def orchestrator_node(state: State) -> dict:
     if forced_kind:
         plan.blog_kind = "news_roundup"
 
-    # Sanitize: fix any task title that equals the blog title
     for i, task in enumerate(plan.tasks):
         if task.title.strip().lower() == plan.blog_title.strip().lower():
             task.title = task.goal[:60].rstrip(".").strip() or f"Section {i + 1}"
@@ -336,7 +336,7 @@ def orchestrator_node(state: State) -> dict:
 
 
 # =============================================================================
-# Fanout  →  parallel workers via Send
+# Fanout
 # =============================================================================
 
 def fanout(state: State):
@@ -358,8 +358,8 @@ def fanout(state: State):
             "recency_days":         state["recency_days"],
             "sections":             [],
             "merged_md":            "",
-            "md_with_placeholders": "",
-            "image_specs":          [],
+            # "image_specs":        [],   # IMAGE GENERATION — commented out
+            # "image_errors":       [],   # IMAGE GENERATION — commented out
             "output_dir":           state.get("output_dir", "."),
             "final":                "",
             "task":                 task.model_dump(),
@@ -392,7 +392,6 @@ def worker_node(payload: dict) -> dict:
     ]
 
     bullets_text = "\n- " + "\n- ".join(task.bullets)
-
     evidence_text = ""
     if evidence and task.requires_citations:
         evidence_text = "\n\nRelevant sources (cite only these URLs if needed):\n" + "\n".join(
@@ -419,7 +418,6 @@ def worker_node(payload: dict) -> dict:
 
     section_md = _strip_think(raw)
 
-    # ── Enforce correct H2 heading ────────────────────────────────────────────
     lines = section_md.splitlines()
     expected = f"## {task.title}"
     blog_title_lower = plan.blog_title.strip().lower()
@@ -429,159 +427,86 @@ def worker_node(payload: dict) -> dict:
     else:
         first = lines[0].strip()
         if not first.startswith("#"):
-            # No heading at all — prepend
             section_md = expected + "\n\n" + section_md
         elif first.lstrip("#").strip().lower() == blog_title_lower:
-            # LLM used blog title — replace with section title
             section_md = expected + "\n\n" + "\n".join(lines[1:]).strip()
         elif first.lstrip("#").strip() != task.title:
-            # Wrong heading — replace
             section_md = expected + "\n\n" + "\n".join(lines[1:]).strip()
 
     return {"sections": [(task.id, section_md)]}
 
 
 # =============================================================================
-# Image planning — rule-based (no LLM needed)
-# Small models reliably fail at complex nested schemas; this avoids that entirely.
+# IMAGE GENERATION — COMMENTED OUT
+# To re-enable:
+#   1. Uncomment everything in this block
+#   2. Uncomment image_specs/image_errors in State, fanout, reducer_node
+#   3. pip install huggingface_hub pillow
+#   4. Add HF_TOKEN=hf_... to .env (free Read token from huggingface.co/settings/tokens)
 # =============================================================================
 
-def _plan_images_rule_based(
-    merged_md: str, topic: str, blog_kind: str
-) -> tuple[str, List[dict]]:
-    """
-    Insert 2 image placeholders at natural break points in the article.
-    Skips news_roundup blogs.
-    Returns (md_with_placeholders, image_specs).
-    """
-    if blog_kind == "news_roundup":
-        return merged_md, []
-
-    # Find all H2 section start positions
-    h2_matches = list(re.finditer(r"^## ", merged_md, re.MULTILINE))
-    if len(h2_matches) < 2:
-        return merged_md, []
-
-    # Insert after section 1 and section 3 (or last section if < 3 sections)
-    target_sections = [h2_matches[0], h2_matches[min(2, len(h2_matches) - 1)]]
-
-    def _end_of_section(md: str, section_start: int) -> int:
-        """Return position of the next H2 after section_start, or end of string."""
-        rest = md[section_start + 3:]
-        nxt = re.search(r"^## ", rest, re.MULTILINE)
-        return section_start + 3 + nxt.start() if nxt else len(md)
-
-    insert_positions = sorted(set(
-        _end_of_section(merged_md, m.start()) for m in target_sections
-    ))
-
-    # Build image specs
-    section_titles = [
-        merged_md[m.start():].split("\n", 1)[0].lstrip("# ").strip()
-        for m in target_sections
-    ]
-    specs = []
-    for i, title in enumerate(section_titles, start=1):
-        specs.append({
-            "placeholder": f"[[IMAGE_{i}]]",
-            "filename": f"image_{i}.png",
-            "alt": f"Diagram illustrating {title}",
-            "caption": f"Figure {i}: {title}",
-            "prompt": (
-                f"A clean, professional technical diagram for a blog post about '{topic}'. "
-                f"This diagram should illustrate the concept: '{title}'. "
-                f"White background, flat vector design style, clear concise labels, "
-                f"no decorative elements, suitable for a technical audience."
-            ),
-        })
-
-    # Insert placeholders (iterate in reverse so character offsets stay valid)
-    parts = merged_md
-    for pos, spec in reversed(list(zip(insert_positions, specs))):
-        parts = parts[:pos] + f"\n\n{spec['placeholder']}\n\n" + parts[pos:]
-
-    return parts, specs
-
-
-# =============================================================================
-# Image generation — Gemini free tier
-# =============================================================================
-
-def _gemini_generate_image_bytes(prompt: str) -> bytes:
-    try:
-        from google import genai
-        from google.genai import types as gtypes
-    except ImportError:
-        raise RuntimeError("google-genai not installed. Run: pip install google-genai")
-
-    api_key = os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        raise RuntimeError("GOOGLE_API_KEY env var is not set.")
-
-    client = genai.Client(api_key=api_key)
-    image_bytes: Optional[bytes] = None
-
-    for model_id in [
-        "gemini-2.5-flash"
-    ]:
-        try:
-            if "imagen" in model_id:
-                resp = client.models.generate_images(
-                    model=model_id,
-                    prompt=prompt,
-                    config=gtypes.GenerateImagesConfig(
-                        number_of_images=1,
-                        aspect_ratio="16:9",
-                        safety_filter_level="block_only_high",
-                    ),
-                )
-                for img in (getattr(resp, "generated_images", []) or []):
-                    data = getattr(getattr(img, "image", None), "image_bytes", None)
-                    if data:
-                        image_bytes = data
-                        break
-            else:
-                resp = client.models.generate_content(
-                    model=model_id,
-                    contents=prompt,
-                    config=gtypes.GenerateContentConfig(
-                        response_modalities=["TEXT", "IMAGE"],
-                    ),
-                )
-                # New SDK layout
-                for candidate in (getattr(resp, "candidates", []) or []):
-                    for part in (getattr(getattr(candidate, "content", None), "parts", []) or []):
-                        data = getattr(getattr(part, "inline_data", None), "data", None)
-                        if data:
-                            image_bytes = data
-                            break
-                    if image_bytes:
-                        break
-                # Old SDK layout fallback
-                if not image_bytes:
-                    for part in (getattr(resp, "parts", []) or []):
-                        data = getattr(getattr(part, "inline_data", None), "data", None)
-                        if data:
-                            image_bytes = data
-                            break
-
-            if image_bytes:
-                print(f"[images] generated via {model_id}")
-                break
-
-        except Exception as e:
-            print(f"[images] {model_id} failed: {e}")
-            continue
-
-    if not image_bytes:
-        raise RuntimeError(
-            "All Gemini image models failed. Check GOOGLE_API_KEY and API quotas."
-        )
-
-    if isinstance(image_bytes, str):
-        import base64
-        return base64.b64decode(image_bytes)
-    return image_bytes
+# def _plan_images_rule_based(merged_md, topic, blog_kind):
+#     if blog_kind == "news_roundup":
+#         return merged_md, []
+#     h2_matches = list(re.finditer(r"^## ", merged_md, re.MULTILINE))
+#     if len(h2_matches) < 2:
+#         return merged_md, []
+#     target_sections = [h2_matches[0], h2_matches[min(2, len(h2_matches) - 1)]]
+#     def _end_of_section(md, section_start):
+#         rest = md[section_start + 3:]
+#         nxt = re.search(r"^## ", rest, re.MULTILINE)
+#         return section_start + 3 + nxt.start() if nxt else len(md)
+#     insert_positions = sorted(set(
+#         _end_of_section(merged_md, m.start()) for m in target_sections
+#     ))
+#     section_titles = [
+#         merged_md[m.start():].split("\n", 1)[0].lstrip("# ").strip()
+#         for m in target_sections
+#     ]
+#     specs = []
+#     for i, title in enumerate(section_titles, start=1):
+#         specs.append({
+#             "placeholder": f"[[IMAGE_{i}]]",
+#             "filename": f"image_{i}.png",
+#             "alt": f"Diagram illustrating {title}",
+#             "caption": f"Figure {i}: {title}",
+#             "prompt": (
+#                 f"Technical diagram, flat design, white background, "
+#                 f"professional illustration for a blog post about '{topic}', "
+#                 f"concept: '{title}', clean vector style, labeled components, "
+#                 f"no people, no text overlays, minimalist"
+#             ),
+#         })
+#     parts = merged_md
+#     for pos, spec in reversed(list(zip(insert_positions, specs))):
+#         parts = parts[:pos] + f"\n\n{spec['placeholder']}\n\n" + parts[pos:]
+#     return parts, specs
+#
+#
+# def _hf_generate_image_bytes(prompt):
+#     from huggingface_hub import InferenceClient
+#     import io
+#     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+#     client = InferenceClient(token=hf_token) if hf_token else InferenceClient()
+#     model = HF_IMAGE_MODEL
+#     print(f"[images] HuggingFace: calling model={model}")
+#     try:
+#         pil_image = client.text_to_image(prompt, model=model)
+#     except Exception as e:
+#         err = str(e)
+#         hint = ""
+#         if "503" in err or "loading" in err.lower():
+#             hint = "\nModel is loading (cold start) — wait 20s and retry."
+#         elif "429" in err or "rate" in err.lower():
+#             hint = "\nRate limit hit. Add HF_TOKEN to .env (free at huggingface.co/settings/tokens)"
+#         elif "401" in err or "unauthorized" in err.lower():
+#             hint = "\nInvalid HF_TOKEN. Check huggingface.co/settings/tokens"
+#         raise RuntimeError(f"HuggingFace image generation failed: {err}{hint}")
+#     buf = io.BytesIO()
+#     pil_image.save(buf, format="PNG")
+#     png_bytes = buf.getvalue()
+#     print(f"[images] ✓ got {len(png_bytes):,} bytes from {model}")
+#     return png_bytes
 
 
 # =============================================================================
@@ -601,7 +526,6 @@ def reducer_node(state: State) -> dict:
         raise ValueError("reducer_node: plan is None — orchestrator may have failed.")
 
     blog_title = plan.blog_title if hasattr(plan, "blog_title") else plan["blog_title"]
-    blog_kind  = plan.blog_kind  if hasattr(plan, "blog_kind")  else plan.get("blog_kind", "explainer")
 
     sections = state.get("sections") or []
     print(f"[reducer] received {len(sections)} sections")
@@ -613,75 +537,70 @@ def reducer_node(state: State) -> dict:
         body = "\n\n".join(ordered).strip()
         merged_md = f"# {blog_title}\n\n{body}\n"
 
-    print(f"[reducer] merged_md length: {len(merged_md)} chars")
+    print(f"[reducer] merged_md: {len(merged_md)} chars")
 
-    # ── Image planning (rule-based — no LLM call) ─────────────────────────────
-    image_specs: List[dict] = []
-    md = merged_md
-    google_api_key = os.environ.get("GOOGLE_API_KEY", "")
+    # ── IMAGE GENERATION — COMMENTED OUT ─────────────────────────────────────
+    # To re-enable, uncomment this entire block and restore image_specs/image_errors
+    # in State and fanout above.
+    #
+    # blog_kind = plan.blog_kind if hasattr(plan, "blog_kind") else plan.get("blog_kind", "explainer")
+    # image_specs: List[dict] = []
+    # image_errors: List[str] = []
+    # md = merged_md
+    # enable_images = os.environ.get("ENABLE_IMAGES", "true").lower() != "false"
+    # should_generate = enable_images and blog_kind != "news_roundup" and bool(sections)
+    # if should_generate:
+    #     md, image_specs = _plan_images_rule_based(merged_md, state["topic"], blog_kind)
+    #     print(f"[reducer] planned {len(image_specs)} images")
+    # output_dir = Path(state.get("output_dir") or ".")
+    # output_dir.mkdir(parents=True, exist_ok=True)
+    # active_specs = image_specs[:2]
+    # if active_specs:
+    #     images_dir = output_dir / "images"
+    #     images_dir.mkdir(exist_ok=True)
+    #     for spec in active_specs:
+    #         placeholder  = spec["placeholder"]
+    #         img_filename = spec["filename"]
+    #         out_path     = images_dir / img_filename
+    #         if out_path.exists():
+    #             print(f"[images] reusing cached {img_filename}")
+    #             img_md = f"![{spec['alt']}](images/{img_filename})\n*{spec['caption']}*"
+    #             md = md.replace(placeholder, img_md)
+    #             continue
+    #         try:
+    #             print(f"[images] generating {img_filename}…")
+    #             img_bytes = _hf_generate_image_bytes(spec["prompt"])
+    #             out_path.write_bytes(img_bytes)
+    #             print(f"[images] saved {out_path} ({len(img_bytes):,} bytes)")
+    #             img_md = f"![{spec['alt']}](images/{img_filename})\n*{spec['caption']}*"
+    #             md = md.replace(placeholder, img_md)
+    #         except Exception as exc:
+    #             err_msg = str(exc)
+    #             print(f"[images] FAILED {img_filename}:\n{err_msg}")
+    #             image_errors.append(f"**{img_filename}**: {err_msg}")
+    #             fallback = (
+    #                 f"\n> **📊 {spec.get('alt', img_filename)}**  \n"
+    #                 f"> _{spec.get('caption', '')}_  \n"
+    #                 f"> ⚠️ Image generation failed — see Images tab for details.\n"
+    #             )
+    #             md = md.replace(placeholder, fallback)
+    # md = re.sub(r"\[\[IMAGE_\d+\]\]", "", md)
+    # ── END IMAGE GENERATION ──────────────────────────────────────────────────
 
-    should_generate_images = (
-        blog_kind != "news_roundup"
-        and bool(sections)
-        and bool(google_api_key)
-    )
+    md = merged_md  # remove this line when re-enabling images above
 
-    if should_generate_images:
-        md, image_specs = _plan_images_rule_based(merged_md, state["topic"], blog_kind)
-        print(f"[reducer] image_specs planned: {len(image_specs)}")
-    else:
-        if not google_api_key:
-            print("[reducer] GOOGLE_API_KEY not set — skipping image generation")
-
-    # ── Generate & embed images (hard cap: 2 for free tier) ───────────────────
     output_dir = Path(state.get("output_dir") or ".")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    active_specs = image_specs[:2]  # never exceed 2 on free tier
-
-    if active_specs:
-        images_dir = output_dir / "images"
-        images_dir.mkdir(exist_ok=True)
-
-        for spec in active_specs:
-            placeholder  = spec["placeholder"]
-            img_filename = spec["filename"]
-            out_path     = images_dir / img_filename
-
-            if not out_path.exists():
-                try:
-                    print(f"[images] generating {img_filename} …")
-                    img_bytes = _gemini_generate_image_bytes(spec["prompt"])
-                    out_path.write_bytes(img_bytes)
-                    print(f"[images] saved {out_path}")
-                except Exception as exc:
-                    print(f"[images] FAILED {img_filename}: {exc}")
-                    fallback = (
-                        f"\n> **📊 {spec.get('alt', img_filename)}**  \n"
-                        f"> _{spec.get('caption', '')}_  \n"
-                        f"> *(Image generation unavailable: {exc})*\n"
-                    )
-                    md = md.replace(placeholder, fallback)
-                    continue
-            else:
-                print(f"[images] {img_filename} already exists, reusing")
-
-            img_md = f"![{spec['alt']}](images/{img_filename})\n*{spec['caption']}*"
-            md = md.replace(placeholder, img_md)
-
-    # Clean any leftover placeholders (e.g. if image_specs had 3 but we capped at 2)
-    md = re.sub(r"\[\[IMAGE_\d+\]\]", "", md)
-
-    # ── Write output markdown ─────────────────────────────────────────────────
     md_path = output_dir / (_safe_slug(blog_title) + ".md")
     md_path.write_text(md, encoding="utf-8")
     print(f"[reducer] wrote {md_path}  ({len(md)} chars)")
 
     return {
-        "final":                md,
-        "merged_md":            merged_md,
-        "md_with_placeholders": md,
-        "image_specs":          active_specs,
+        "final":   md,
+        "merged_md": merged_md,
+        # "image_specs":  active_specs,    # IMAGE GENERATION — commented out
+        # "image_errors": image_errors,    # IMAGE GENERATION — commented out
     }
 
 

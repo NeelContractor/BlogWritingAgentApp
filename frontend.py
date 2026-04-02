@@ -7,7 +7,7 @@ import zipfile
 from datetime import date
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
@@ -34,39 +34,35 @@ def get_output_dir() -> Path:
     return Path(st.session_state["output_dir"])
 
 
-def bundle_zip(md_text: str, md_filename: str, images_dir: Path) -> bytes:
+def bundle_zip(md_text: str, md_filename: str) -> bytes:
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr(md_filename, md_text.encode("utf-8"))
-        if images_dir.exists():
-            for p in images_dir.rglob("*"):
-                if p.is_file():
-                    z.write(p, arcname=str(p.relative_to(images_dir.parent)))
+        # IMAGE GENERATION — uncomment to include images in bundle
+        # if images_dir.exists():
+        #     for p in images_dir.rglob("*"):
+        #         if p.is_file():
+        #             z.write(p, arcname=str(p.relative_to(images_dir.parent)))
     return buf.getvalue()
 
 
-def images_zip(images_dir: Path) -> Optional[bytes]:
-    if not images_dir.exists():
-        return None
-    buf = BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        for p in images_dir.rglob("*"):
-            if p.is_file():
-                z.write(p, arcname=str(p.relative_to(images_dir.parent)))
-    return buf.getvalue()
+# IMAGE GENERATION — commented out
+# def images_zip(images_dir: Path) -> Optional[bytes]:
+#     if not images_dir.exists():
+#         return None
+#     buf = BytesIO()
+#     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+#         for p in images_dir.rglob("*"):
+#             if p.is_file():
+#                 z.write(p, arcname=str(p.relative_to(images_dir.parent)))
+#     return buf.getvalue()
 
 
 # =============================================================================
-# Graph runner  — streams once, accumulates state, never calls invoke() again
+# Graph runner
 # =============================================================================
 
 def run_graph(graph_app, inputs: Dict[str, Any]):
-    """
-    Yields:
-      ("node",  node_name, update_dict)
-      ("final", None,      full_state_dict)
-      ("error", None,      {"error": str})
-    """
     accumulated: Dict[str, Any] = dict(inputs)
     try:
         for chunk in graph_app.stream(inputs, stream_mode="updates"):
@@ -74,7 +70,6 @@ def run_graph(graph_app, inputs: Dict[str, Any]):
                 continue
             for node_name, update in chunk.items():
                 if isinstance(update, dict):
-                    # operator.add keys: merge lists instead of replacing
                     if "sections" in update and isinstance(update["sections"], list):
                         existing = accumulated.get("sections") or []
                         accumulated["sections"] = existing + update["sections"]
@@ -85,7 +80,6 @@ def run_graph(graph_app, inputs: Dict[str, Any]):
                 yield ("node", node_name, update if isinstance(update, dict) else {})
         yield ("final", None, accumulated)
     except Exception as stream_err:
-        # Hard fallback: plain invoke
         yield ("node", "⚠️ streaming failed, invoking directly…", {})
         try:
             result = graph_app.invoke(inputs)
@@ -95,16 +89,11 @@ def run_graph(graph_app, inputs: Dict[str, Any]):
 
 
 def extract_final(out: Dict[str, Any]) -> str:
-    """
-    Pull the blog markdown out of the final state dict,
-    trying several fallback keys so we never show 'None'.
-    """
-    for key in ("final", "merged_md", "md_with_placeholders"):
+    for key in ("final", "merged_md"):
         val = out.get(key)
         if val and isinstance(val, str) and val.strip() and val.strip().lower() != "none":
             return val
 
-    # Last resort: reassemble from sections
     sections = out.get("sections") or []
     if sections:
         plan = out.get("plan")
@@ -116,16 +105,14 @@ def extract_final(out: Dict[str, Any]) -> str:
         ordered = [md for _, md in sorted(sections, key=lambda x: x[0])]
         body = "\n\n".join(ordered).strip()
         return f"# {title}\n\n{body}\n" if title else body
-
     return ""
 
 
 # =============================================================================
-# Markdown → styled HTML  (images embedded as base64 data URIs)
+# Markdown → styled HTML
 # =============================================================================
 
 def _image_to_data_uri(src: str, output_dir: Path) -> str:
-    """Return a base64 data URI for a local image, or the original src if remote/missing."""
     if src.startswith("http://") or src.startswith("https://"):
         return src
     for base in [output_dir, Path(".")]:
@@ -136,11 +123,10 @@ def _image_to_data_uri(src: str, output_dir: Path) -> str:
                     "gif": "image/gif",  "webp": "image/webp"}.get(suffix.lstrip("."), "image/png")
             data = base64.b64encode(candidate.read_bytes()).decode()
             return f"data:{mime};base64,{data}"
-    return src  # not found — let the browser show a broken image
+    return src
 
 
 def _md_to_html(md: str, output_dir: Path) -> str:
-    # Embed local images as data URIs
     def _replace_img(m: re.Match) -> str:
         alt = m.group("alt")
         src = m.group("src").strip()
@@ -148,7 +134,6 @@ def _md_to_html(md: str, output_dir: Path) -> str:
 
     md_patched = re.sub(r"!\[(?P<alt>[^\]]*)\]\((?P<src>[^)]+)\)", _replace_img, md)
 
-    # Convert markdown → HTML
     try:
         import markdown as md_lib
         html_body = md_lib.markdown(md_patched, extensions=["fenced_code", "tables", "nl2br"])
@@ -162,26 +147,18 @@ def _md_to_html(md: str, output_dir: Path) -> str:
 <style>
   body {{
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    line-height: 1.75;
-    max-width: 820px;
-    margin: 0 auto;
-    padding: 2rem 1.5rem 4rem;
-    color: #1a1a1a;
-    background: #fff;
+    line-height: 1.75; max-width: 820px; margin: 0 auto;
+    padding: 2rem 1.5rem 4rem; color: #1a1a1a; background: #fff;
   }}
   h1 {{ font-size: 2rem; border-bottom: 2px solid #e5e7eb; padding-bottom: .4rem; margin-top: 0; }}
   h2 {{ font-size: 1.4rem; margin-top: 2.2rem; color: #111; }}
   h3 {{ font-size: 1.1rem; color: #333; }}
-  pre {{
-    background: #f6f8fa; border: 1px solid #ddd; border-radius: 6px;
-    padding: 1rem; overflow-x: auto; font-size: .85rem;
-  }}
+  pre {{ background: #f6f8fa; border: 1px solid #ddd; border-radius: 6px;
+         padding: 1rem; overflow-x: auto; font-size: .85rem; }}
   code {{ background: #f0f0f0; padding: 2px 5px; border-radius: 3px; font-size: .88em; }}
   pre code {{ background: none; padding: 0; }}
-  blockquote {{
-    border-left: 4px solid #d1d5db; margin: 1rem 0;
-    padding: .5rem 1rem; color: #555; background: #fafafa;
-  }}
+  blockquote {{ border-left: 4px solid #d1d5db; margin: 1rem 0;
+                padding: .5rem 1rem; color: #555; background: #fafafa; }}
   img {{ max-width: 100%; border-radius: 6px; margin: 1.2rem 0; display: block; }}
   em {{ color: #555; }}
   table {{ border-collapse: collapse; width: 100%; margin: 1rem 0; }}
@@ -198,17 +175,13 @@ def _md_to_html(md: str, output_dir: Path) -> str:
 
 
 def _simple_md_to_html(md: str) -> str:
-    """Bare-minimum markdown renderer used only when the `markdown` package is absent."""
     lines, out, in_code, in_ul = md.split("\n"), [], False, False
     for line in lines:
         if line.startswith("```"):
-            if in_code:
-                out.append("</code></pre>"); in_code = False
-            else:
-                out.append("<pre><code>"); in_code = True
+            if in_code: out.append("</code></pre>"); in_code = False
+            else: out.append("<pre><code>"); in_code = True
             continue
-        if in_code:
-            out.append(line); continue
+        if in_code: out.append(line); continue
         if in_ul and not (line.startswith("- ") or line.startswith("* ")):
             out.append("</ul>"); in_ul = False
         if re.match(r"^#{1,6} ", line):
@@ -268,16 +241,16 @@ output_dir = get_output_dir()
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Generate New Blog")
-    topic = st.text_area("Topic", height=120,
-                         placeholder="e.g. How attention mechanisms work in transformers")
-    as_of    = st.date_input("As-of date", value=date.today())
-    run_btn  = st.button("🚀 Generate Blog", type="primary", use_container_width=True)
+    topic   = st.text_area("Topic", height=120,
+                            placeholder="e.g. How attention mechanisms work in transformers")
+    as_of   = st.date_input("As-of date", value=date.today())
+    run_btn = st.button("🚀 Generate Blog", type="primary", use_container_width=True)
 
     st.divider()
     st.subheader("📂 Past Blogs")
     past_files = list_past_blogs(output_dir)
     if not past_files:
-        st.caption(f"No saved blogs yet.")
+        st.caption("No saved blogs yet.")
         selected_md_file = None
     else:
         options: List[str] = []
@@ -298,8 +271,9 @@ with st.sidebar:
         if st.button("📖 Load selected blog", use_container_width=True):
             if selected_md_file:
                 md_text = selected_md_file.read_text(encoding="utf-8", errors="replace")
-                st.session_state["last_out"] = {"plan": None, "evidence": [],
-                                                "image_specs": [], "final": md_text}
+                st.session_state["last_out"] = {
+                    "plan": None, "evidence": [], "final": md_text,
+                }
                 st.success(f"Loaded: {selected_md_file.name}")
 
 # ── Session state ─────────────────────────────────────────────────────────────
@@ -308,9 +282,11 @@ if "last_out" not in st.session_state:
 if "logs" not in st.session_state:
     st.session_state["logs"] = []
 
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_plan, tab_evidence, tab_preview, tab_images, tab_logs = st.tabs(
-    ["🧩 Plan", "🔎 Evidence", "📝 Preview", "🖼️ Images", "🧾 Logs"]
+# ── Tabs — removed 🖼️ Images tab (IMAGE GENERATION commented out) ─────────────
+# To re-enable the Images tab, add "🖼️ Images" back to the list below
+# and uncomment the "── Images ──" section further down.
+tab_plan, tab_evidence, tab_preview, tab_logs = st.tabs(
+    ["🧩 Plan", "🔎 Evidence", "📝 Preview", "🧾 Logs"]
 )
 
 # ── Run ───────────────────────────────────────────────────────────────────────
@@ -320,26 +296,26 @@ if run_btn:
         st.stop()
 
     inputs: Dict[str, Any] = {
-        "topic":                topic.strip(),
-        "mode":                 "",
-        "needs_research":       False,
-        "queries":              [],
-        "evidence":             [],
-        "plan":                 None,
-        "as_of":                as_of.isoformat(),
-        "recency_days":         7,
-        "sections":             [],
-        "merged_md":            "",
-        "md_with_placeholders": "",
-        "image_specs":          [],
-        "output_dir":           str(output_dir),
-        "final":                "",
+        "topic":      topic.strip(),
+        "mode":       "",
+        "needs_research": False,
+        "queries":    [],
+        "evidence":   [],
+        "plan":       None,
+        "as_of":      as_of.isoformat(),
+        "recency_days": 7,
+        "sections":   [],
+        "merged_md":  "",
+        # "image_specs":  [],   # IMAGE GENERATION — commented out
+        # "image_errors": [],   # IMAGE GENERATION — commented out
+        "output_dir": str(output_dir),
+        "final":      "",
     }
 
     st.session_state["logs"] = []
-    status            = st.status("Running graph…", expanded=True)
-    progress_holder   = st.empty()
-    last_node         = None
+    status          = st.status("Running graph…", expanded=True)
+    progress_holder = st.empty()
+    last_node       = None
 
     for kind, node_name, payload in run_graph(app, inputs):
 
@@ -348,8 +324,7 @@ if run_btn:
                 status.write(f"➡️ `{node_name}`")
                 last_node = node_name
             if payload:
-                preview_keys = ("mode", "needs_research", "queries",
-                                "plan", "image_specs", "sections", "final")
+                preview_keys = ("mode", "needs_research", "queries", "plan", "sections", "final")
                 summary = {k: v for k, v in payload.items() if k in preview_keys}
                 if summary:
                     try:
@@ -420,7 +395,7 @@ if out:
 
     # ── Preview ───────────────────────────────────────────────────────────────
     with tab_preview:
-        final_md = extract_final(out)          # ← robust extraction, never returns "None"
+        final_md = extract_final(out)
 
         if not final_md:
             st.warning("No content yet — check the Logs tab for errors.")
@@ -437,40 +412,49 @@ if out:
                                    file_name=md_filename, mime="text/markdown",
                                    use_container_width=True)
             with col_dl2:
-                bundle = bundle_zip(final_md, md_filename, output_dir / "images")
-                st.download_button("📦 Download Bundle (MD + images)", data=bundle,
+                bundle = bundle_zip(final_md, md_filename)
+                st.download_button("📦 Download Bundle", data=bundle,
                                    file_name=f"{safe_slug(blog_title)}_bundle.zip",
                                    mime="application/zip", use_container_width=True)
 
             render_markdown_preview(final_md, output_dir)
-
             with st.expander("🔤 Raw Markdown"):
                 st.code(final_md, language="markdown")
 
-    # ── Images ────────────────────────────────────────────────────────────────
-    with tab_images:
-        specs       = out.get("image_specs") or []
-        images_dir  = output_dir / "images"
-
-        if not specs and not images_dir.exists():
-            st.info("No images generated.")
-        else:
-            if specs:
-                with st.expander("Image prompts & specs"):
-                    st.json(specs)
-            if images_dir.exists():
-                files = sorted(p for p in images_dir.iterdir() if p.is_file())
-                if files:
-                    cols = st.columns(min(len(files), 3))
-                    for i, p in enumerate(files):
-                        with cols[i % 3]:
-                            st.image(str(p), caption=p.name, use_container_width=True)
-                else:
-                    st.warning("images/ folder is empty.")
-                z = images_zip(images_dir)
-                if z:
-                    st.download_button("⬇️ Download All Images", data=z,
-                                       file_name="images.zip", mime="application/zip")
+    # ── Images tab — IMAGE GENERATION COMMENTED OUT ───────────────────────────
+    # To re-enable:
+    #   1. Add "🖼️ Images" back to the st.tabs() call above
+    #   2. Add tab_images to the unpacking line above
+    #   3. Uncomment the block below
+    #   4. Uncomment image logic in backend.py
+    #
+    # with tab_images:
+    #     specs        = out.get("image_specs") or []
+    #     image_errors = out.get("image_errors") or []
+    #     images_dir   = output_dir / "images"
+    #     if image_errors:
+    #         for err in image_errors:
+    #             st.error(f"⚠️ {err}")
+    #         with st.expander("🔧 How to fix"):
+    #             st.markdown("""
+    # **pip install huggingface_hub pillow**
+    # Add to .env: `HF_TOKEN=hf_...` (free Read token from huggingface.co/settings/tokens)
+    # If model is loading (503): wait 20s and retry.
+    #             """)
+    #     if specs:
+    #         with st.expander("Image prompts & specs"):
+    #             st.json(specs)
+    #     if images_dir.exists():
+    #         files = sorted(p for p in images_dir.iterdir() if p.is_file())
+    #         if files:
+    #             cols = st.columns(min(len(files), 3))
+    #             for i, p in enumerate(files):
+    #                 with cols[i % 3]:
+    #                     st.image(str(p), caption=p.name, use_container_width=True)
+    #             z = images_zip(images_dir)
+    #             if z:
+    #                 st.download_button("⬇️ Download All Images", data=z,
+    #                                    file_name="images.zip", mime="application/zip")
 
     # ── Logs ──────────────────────────────────────────────────────────────────
     with tab_logs:
