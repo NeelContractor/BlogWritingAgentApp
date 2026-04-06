@@ -3,34 +3,29 @@ from __future__ import annotations
 import operator
 import os
 import re
+import time
+import streamlit as st
 from datetime import date, timedelta
 from pathlib import Path
 from typing import TypedDict, List, Optional, Literal, Annotated
 
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
-from langgraph.types import Send
 
-from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 
 load_dotenv()
 
-MODEL_NAME = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+try:
+    for key, value in st.secrets.items():
+        if isinstance(value, str):
+            os.environ.setdefault(key, value)
+except Exception:
+    pass
 
-# =============================================================================
-# IMAGE GENERATION — COMMENTED OUT
-# To re-enable: uncomment HF_IMAGE_MODEL and the image functions below,
-# then uncomment the image block in reducer_node().
-#
-# HF_IMAGE_MODEL = os.getenv("HF_IMAGE_MODEL", "black-forest-labs/FLUX.1-schnell")
-#
-# Setup when re-enabling:
-#   pip install huggingface_hub pillow
-#   Add to .env (optional, gives higher rate limits):
-#   HF_TOKEN=hf_your_token_here  (Read access only, free at huggingface.co/settings/tokens)
-# =============================================================================
+MODEL_NAME = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 
 # =============================================================================
@@ -89,8 +84,6 @@ class State(TypedDict):
     recency_days: int
     sections: Annotated[List[tuple], operator.add]
     merged_md: str
-    # image_specs: List[dict]   # IMAGE GENERATION — commented out
-    # image_errors: List[str]   # IMAGE GENERATION — commented out
     output_dir: str
     final: str
 
@@ -99,7 +92,11 @@ class State(TypedDict):
 # LLM helpers
 # =============================================================================
 
-_BASE_LLM = ChatOllama(model=MODEL_NAME, temperature=0.3)
+_BASE_LLM = ChatGroq(
+    model=MODEL_NAME,
+    api_key=os.getenv("GROQ_API_KEY"),
+    temperature=0.3,
+)
 
 def _strip_think(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
@@ -120,13 +117,21 @@ class _CleanLLM:
 llm = _CleanLLM(_BASE_LLM)
 
 
-def _invoke_structured(schema, messages, retries: int = 2):
-    try:
-        result = llm.with_structured_output(schema).invoke(messages)
-        if result is not None:
-            return result
-    except Exception as e1:
-        print(f"[structured] with_structured_output failed ({type(e1).__name__}: {e1}), trying raw JSON…")
+def _invoke_structured(schema, messages, retries: int = 3):
+    for attempt in range(retries):
+        try:
+            result = llm.with_structured_output(schema).invoke(messages)
+            if result is not None:
+                return result
+        except Exception as e:
+            err = str(e)
+            if "rate_limit" in err.lower() or "429" in err.lower():
+                wait = (attempt + 1) * 10
+                print(f"[structured] rate limited, waiting {wait}s…")
+                time.sleep(wait)
+                continue
+            print(f"[structured] with_structured_output failed ({type(e).__name__}: {e}), trying raw JSON…")
+            break
 
     import json
     from langchain_core.messages import HumanMessage as HM
@@ -145,12 +150,16 @@ def _invoke_structured(schema, messages, retries: int = 2):
                 raw = match.group(0)
             data = json.loads(raw)
             return schema(**data)
-        except Exception as e2:
-            print(f"[structured] raw JSON attempt {attempt + 1} failed: {e2}")
+        except Exception as e:
+            if "rate_limit" in str(e).lower() or "429" in str(e).lower():
+                wait = (attempt + 1) * 10
+                print(f"[structured] rate limited, waiting {wait}s…")
+                time.sleep(wait)
+                continue
+            print(f"[structured] raw JSON attempt {attempt + 1} failed: {e}")
 
     raise RuntimeError(
-        f"Could not get structured output for {schema.__name__} after {retries} attempts. "
-        "Try a larger model: OLLAMA_MODEL=mistral"
+        f"Could not get structured output for {schema.__name__} after {retries} attempts."
     )
 
 
@@ -273,11 +282,11 @@ def research_node(state: State) -> dict:
 # =============================================================================
 
 ORCH_SYSTEM = """\
-You are a senior technical writer. Create a blog outline with 5-7 sections.
+You are a senior technical writer. Create a blog outline with EXACTLY 4 sections.
 
 RULES:
 - Each section MUST have a unique, descriptive title (NOT the blog title).
-- Each section needs: goal (1 sentence), 3-5 bullets, target_words (150-400).
+- Each section needs: goal (1 sentence), 3-4 bullets, target_words (150-250).
 - blog_kind must be exactly one of: explainer, tutorial, news_roundup, comparison, system_design
 
 Respond with valid JSON only. Use this exact structure:
@@ -293,7 +302,7 @@ Respond with valid JSON only. Use this exact structure:
       "title": "Descriptive Section Title Here",
       "goal": "One clear sentence describing what the reader will learn.",
       "bullets": ["point 1", "point 2", "point 3"],
-      "target_words": 250,
+      "target_words": 200,
       "tags": [],
       "requires_research": false,
       "requires_citations": false,
@@ -328,6 +337,8 @@ def orchestrator_node(state: State) -> dict:
     if forced_kind:
         plan.blog_kind = "news_roundup"
 
+    plan.tasks = plan.tasks[:4]
+
     for i, task in enumerate(plan.tasks):
         if task.title.strip().lower() == plan.blog_title.strip().lower():
             task.title = task.goal[:60].rstrip(".").strip() or f"Section {i + 1}"
@@ -336,40 +347,7 @@ def orchestrator_node(state: State) -> dict:
 
 
 # =============================================================================
-# Fanout
-# =============================================================================
-
-def fanout(state: State):
-    assert state["plan"] is not None
-    plan_dict = state["plan"].model_dump()
-    evidence_list = [
-        e.model_dump() if hasattr(e, "model_dump") else e
-        for e in state.get("evidence", [])
-    ]
-    return [
-        Send("worker", {
-            "topic":                state["topic"],
-            "mode":                 state["mode"],
-            "needs_research":       state.get("needs_research", False),
-            "queries":              state.get("queries", []),
-            "evidence":             evidence_list,
-            "plan":                 plan_dict,
-            "as_of":                state["as_of"],
-            "recency_days":         state["recency_days"],
-            "sections":             [],
-            "merged_md":            "",
-            # "image_specs":        [],   # IMAGE GENERATION — commented out
-            # "image_errors":       [],   # IMAGE GENERATION — commented out
-            "output_dir":           state.get("output_dir", "."),
-            "final":                "",
-            "task":                 task.model_dump(),
-        })
-        for task in state["plan"].tasks
-    ]
-
-
-# =============================================================================
-# Worker
+# Sections (sequential — avoids Groq rate limits)
 # =============================================================================
 
 WORKER_SYSTEM = """\
@@ -383,14 +361,8 @@ RULES:
 5. Use subheadings (###), code blocks (```), or lists where they genuinely help.
 6. Do NOT repeat the blog title as your section heading."""
 
-def worker_node(payload: dict) -> dict:
-    task     = Task(**payload["task"])
-    plan     = Plan(**payload["plan"])
-    evidence = [
-        EvidenceItem(**e) if isinstance(e, dict) else e
-        for e in payload.get("evidence", [])
-    ]
 
+def _write_section(task: Task, plan: Plan, evidence: list) -> tuple:
     bullets_text = "\n- " + "\n- ".join(task.bullets)
     evidence_text = ""
     if evidence and task.requires_citations:
@@ -411,102 +383,63 @@ def worker_node(payload: dict) -> dict:
         f"Begin your response with: ## {task.title}"
     )
 
-    raw = llm.invoke([
-        SystemMessage(content=WORKER_SYSTEM),
-        HumanMessage(content=prompt),
-    ]).content.strip()
+    for attempt in range(4):
+        try:
+            raw = llm.invoke([
+                SystemMessage(content=WORKER_SYSTEM),
+                HumanMessage(content=prompt),
+            ]).content.strip()
 
-    section_md = _strip_think(raw)
+            section_md = _strip_think(raw)
+            lines = section_md.splitlines()
+            expected = f"## {task.title}"
+            blog_title_lower = plan.blog_title.strip().lower()
 
-    lines = section_md.splitlines()
-    expected = f"## {task.title}"
-    blog_title_lower = plan.blog_title.strip().lower()
+            if not lines:
+                section_md = f"{expected}\n\n(empty section)"
+            else:
+                first = lines[0].strip()
+                if not first.startswith("#"):
+                    section_md = expected + "\n\n" + section_md
+                elif first.lstrip("#").strip().lower() == blog_title_lower:
+                    section_md = expected + "\n\n" + "\n".join(lines[1:]).strip()
+                elif first.lstrip("#").strip() != task.title:
+                    section_md = expected + "\n\n" + "\n".join(lines[1:]).strip()
 
-    if not lines:
-        section_md = f"{expected}\n\n(empty section)"
-    else:
-        first = lines[0].strip()
-        if not first.startswith("#"):
-            section_md = expected + "\n\n" + section_md
-        elif first.lstrip("#").strip().lower() == blog_title_lower:
-            section_md = expected + "\n\n" + "\n".join(lines[1:]).strip()
-        elif first.lstrip("#").strip() != task.title:
-            section_md = expected + "\n\n" + "\n".join(lines[1:]).strip()
+            return (task.id, section_md)
 
-    return {"sections": [(task.id, section_md)]}
+        except Exception as e:
+            if "rate_limit" in str(e).lower() or "429" in str(e).lower():
+                wait = (attempt + 1) * 15
+                print(f"[worker] rate limited on '{task.title}', waiting {wait}s…")
+                time.sleep(wait)
+            else:
+                print(f"[worker] failed on '{task.title}': {e}")
+                return (task.id, f"## {task.title}\n\n*(generation failed: {e})*")
+
+    return (task.id, f"## {task.title}\n\n*(generation failed after retries)*")
 
 
-# =============================================================================
-# IMAGE GENERATION — COMMENTED OUT
-# To re-enable:
-#   1. Uncomment everything in this block
-#   2. Uncomment image_specs/image_errors in State, fanout, reducer_node
-#   3. pip install huggingface_hub pillow
-#   4. Add HF_TOKEN=hf_... to .env (free Read token from huggingface.co/settings/tokens)
-# =============================================================================
+def sections_node(state: State) -> dict:
+    plan = state.get("plan")
+    if plan is None:
+        print("[sections] plan is None — orchestrator failed")
+        return {"sections": []}
 
-# def _plan_images_rule_based(merged_md, topic, blog_kind):
-#     if blog_kind == "news_roundup":
-#         return merged_md, []
-#     h2_matches = list(re.finditer(r"^## ", merged_md, re.MULTILINE))
-#     if len(h2_matches) < 2:
-#         return merged_md, []
-#     target_sections = [h2_matches[0], h2_matches[min(2, len(h2_matches) - 1)]]
-#     def _end_of_section(md, section_start):
-#         rest = md[section_start + 3:]
-#         nxt = re.search(r"^## ", rest, re.MULTILINE)
-#         return section_start + 3 + nxt.start() if nxt else len(md)
-#     insert_positions = sorted(set(
-#         _end_of_section(merged_md, m.start()) for m in target_sections
-#     ))
-#     section_titles = [
-#         merged_md[m.start():].split("\n", 1)[0].lstrip("# ").strip()
-#         for m in target_sections
-#     ]
-#     specs = []
-#     for i, title in enumerate(section_titles, start=1):
-#         specs.append({
-#             "placeholder": f"[[IMAGE_{i}]]",
-#             "filename": f"image_{i}.png",
-#             "alt": f"Diagram illustrating {title}",
-#             "caption": f"Figure {i}: {title}",
-#             "prompt": (
-#                 f"Technical diagram, flat design, white background, "
-#                 f"professional illustration for a blog post about '{topic}', "
-#                 f"concept: '{title}', clean vector style, labeled components, "
-#                 f"no people, no text overlays, minimalist"
-#             ),
-#         })
-#     parts = merged_md
-#     for pos, spec in reversed(list(zip(insert_positions, specs))):
-#         parts = parts[:pos] + f"\n\n{spec['placeholder']}\n\n" + parts[pos:]
-#     return parts, specs
-#
-#
-# def _hf_generate_image_bytes(prompt):
-#     from huggingface_hub import InferenceClient
-#     import io
-#     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
-#     client = InferenceClient(token=hf_token) if hf_token else InferenceClient()
-#     model = HF_IMAGE_MODEL
-#     print(f"[images] HuggingFace: calling model={model}")
-#     try:
-#         pil_image = client.text_to_image(prompt, model=model)
-#     except Exception as e:
-#         err = str(e)
-#         hint = ""
-#         if "503" in err or "loading" in err.lower():
-#             hint = "\nModel is loading (cold start) — wait 20s and retry."
-#         elif "429" in err or "rate" in err.lower():
-#             hint = "\nRate limit hit. Add HF_TOKEN to .env (free at huggingface.co/settings/tokens)"
-#         elif "401" in err or "unauthorized" in err.lower():
-#             hint = "\nInvalid HF_TOKEN. Check huggingface.co/settings/tokens"
-#         raise RuntimeError(f"HuggingFace image generation failed: {err}{hint}")
-#     buf = io.BytesIO()
-#     pil_image.save(buf, format="PNG")
-#     png_bytes = buf.getvalue()
-#     print(f"[images] ✓ got {len(png_bytes):,} bytes from {model}")
-#     return png_bytes
+    evidence = [
+        EvidenceItem(**e) if isinstance(e, dict) else e
+        for e in state.get("evidence", [])
+    ]
+
+    results = []
+    for i, task in enumerate(plan.tasks):
+        print(f"[sections] writing {i+1}/{len(plan.tasks)}: {task.title}")
+        result = _write_section(task, plan, evidence)
+        results.append(result)
+        if i < len(plan.tasks) - 1:
+            time.sleep(5)
+
+    return {"sections": results}
 
 
 # =============================================================================
@@ -531,63 +464,13 @@ def reducer_node(state: State) -> dict:
     print(f"[reducer] received {len(sections)} sections")
 
     if not sections:
-        merged_md = f"# {blog_title}\n\n*(No sections were generated — check worker logs.)*\n"
+        md = f"# {blog_title}\n\n*(No sections were generated — check worker logs.)*\n"
     else:
-        ordered = [md for _, md in sorted(sections, key=lambda x: x[0])]
+        ordered = [s for _, s in sorted(sections, key=lambda x: x[0])]
         body = "\n\n".join(ordered).strip()
-        merged_md = f"# {blog_title}\n\n{body}\n"
+        md = f"# {blog_title}\n\n{body}\n"
 
-    print(f"[reducer] merged_md: {len(merged_md)} chars")
-
-    # ── IMAGE GENERATION — COMMENTED OUT ─────────────────────────────────────
-    # To re-enable, uncomment this entire block and restore image_specs/image_errors
-    # in State and fanout above.
-    #
-    # blog_kind = plan.blog_kind if hasattr(plan, "blog_kind") else plan.get("blog_kind", "explainer")
-    # image_specs: List[dict] = []
-    # image_errors: List[str] = []
-    # md = merged_md
-    # enable_images = os.environ.get("ENABLE_IMAGES", "true").lower() != "false"
-    # should_generate = enable_images and blog_kind != "news_roundup" and bool(sections)
-    # if should_generate:
-    #     md, image_specs = _plan_images_rule_based(merged_md, state["topic"], blog_kind)
-    #     print(f"[reducer] planned {len(image_specs)} images")
-    # output_dir = Path(state.get("output_dir") or ".")
-    # output_dir.mkdir(parents=True, exist_ok=True)
-    # active_specs = image_specs[:2]
-    # if active_specs:
-    #     images_dir = output_dir / "images"
-    #     images_dir.mkdir(exist_ok=True)
-    #     for spec in active_specs:
-    #         placeholder  = spec["placeholder"]
-    #         img_filename = spec["filename"]
-    #         out_path     = images_dir / img_filename
-    #         if out_path.exists():
-    #             print(f"[images] reusing cached {img_filename}")
-    #             img_md = f"![{spec['alt']}](images/{img_filename})\n*{spec['caption']}*"
-    #             md = md.replace(placeholder, img_md)
-    #             continue
-    #         try:
-    #             print(f"[images] generating {img_filename}…")
-    #             img_bytes = _hf_generate_image_bytes(spec["prompt"])
-    #             out_path.write_bytes(img_bytes)
-    #             print(f"[images] saved {out_path} ({len(img_bytes):,} bytes)")
-    #             img_md = f"![{spec['alt']}](images/{img_filename})\n*{spec['caption']}*"
-    #             md = md.replace(placeholder, img_md)
-    #         except Exception as exc:
-    #             err_msg = str(exc)
-    #             print(f"[images] FAILED {img_filename}:\n{err_msg}")
-    #             image_errors.append(f"**{img_filename}**: {err_msg}")
-    #             fallback = (
-    #                 f"\n> **📊 {spec.get('alt', img_filename)}**  \n"
-    #                 f"> _{spec.get('caption', '')}_  \n"
-    #                 f"> ⚠️ Image generation failed — see Images tab for details.\n"
-    #             )
-    #             md = md.replace(placeholder, fallback)
-    # md = re.sub(r"\[\[IMAGE_\d+\]\]", "", md)
-    # ── END IMAGE GENERATION ──────────────────────────────────────────────────
-
-    md = merged_md  # remove this line when re-enabling images above
+    print(f"[reducer] merged_md: {len(md)} chars")
 
     output_dir = Path(state.get("output_dir") or ".")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -597,10 +480,8 @@ def reducer_node(state: State) -> dict:
     print(f"[reducer] wrote {md_path}  ({len(md)} chars)")
 
     return {
-        "final":   md,
-        "merged_md": merged_md,
-        # "image_specs":  active_specs,    # IMAGE GENERATION — commented out
-        # "image_errors": image_errors,    # IMAGE GENERATION — commented out
+        "final":     md,
+        "merged_md": md,
     }
 
 
@@ -612,7 +493,7 @@ g = StateGraph(State)
 g.add_node("router",       router_node)
 g.add_node("research",     research_node)
 g.add_node("orchestrator", orchestrator_node)
-g.add_node("worker",       worker_node)
+g.add_node("sections",     sections_node)
 g.add_node("reducer",      reducer_node)
 
 g.add_edge(START, "router")
@@ -621,8 +502,8 @@ g.add_conditional_edges(
     {"research": "research", "orchestrator": "orchestrator"},
 )
 g.add_edge("research",     "orchestrator")
-g.add_conditional_edges("orchestrator", fanout, ["worker"])
-g.add_edge("worker",       "reducer")
+g.add_edge("orchestrator", "sections")
+g.add_edge("sections",     "reducer")
 g.add_edge("reducer",      END)
 
 app = g.compile()

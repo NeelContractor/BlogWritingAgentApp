@@ -11,9 +11,9 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 from backend import app
+
 
 # =============================================================================
 # Utilities
@@ -38,24 +38,7 @@ def bundle_zip(md_text: str, md_filename: str) -> bytes:
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr(md_filename, md_text.encode("utf-8"))
-        # IMAGE GENERATION — uncomment to include images in bundle
-        # if images_dir.exists():
-        #     for p in images_dir.rglob("*"):
-        #         if p.is_file():
-        #             z.write(p, arcname=str(p.relative_to(images_dir.parent)))
     return buf.getvalue()
-
-
-# IMAGE GENERATION — commented out
-# def images_zip(images_dir: Path) -> Optional[bytes]:
-#     if not images_dir.exists():
-#         return None
-#     buf = BytesIO()
-#     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-#         for p in images_dir.rglob("*"):
-#             if p.is_file():
-#                 z.write(p, arcname=str(p.relative_to(images_dir.parent)))
-#     return buf.getvalue()
 
 
 # =============================================================================
@@ -120,7 +103,7 @@ def _image_to_data_uri(src: str, output_dir: Path) -> str:
         if candidate.exists():
             suffix = candidate.suffix.lower()
             mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
-                    "gif": "image/gif",  "webp": "image/webp"}.get(suffix.lstrip("."), "image/png")
+                    "gif": "image/gif", "webp": "image/webp"}.get(suffix.lstrip("."), "image/png")
             data = base64.b64encode(candidate.read_bytes()).decode()
             return f"data:{mime};base64,{data}"
     return src
@@ -178,10 +161,13 @@ def _simple_md_to_html(md: str) -> str:
     lines, out, in_code, in_ul = md.split("\n"), [], False, False
     for line in lines:
         if line.startswith("```"):
-            if in_code: out.append("</code></pre>"); in_code = False
-            else: out.append("<pre><code>"); in_code = True
+            if in_code:
+                out.append("</code></pre>"); in_code = False
+            else:
+                out.append("<pre><code>"); in_code = True
             continue
-        if in_code: out.append(line); continue
+        if in_code:
+            out.append(line); continue
         if in_ul and not (line.startswith("- ") or line.startswith("* ")):
             out.append("</ul>"); in_ul = False
         if re.match(r"^#{1,6} ", line):
@@ -190,7 +176,8 @@ def _simple_md_to_html(md: str) -> str:
         elif line.startswith("> "):
             out.append(f"<blockquote>{line[2:]}</blockquote>")
         elif line.startswith("- ") or line.startswith("* "):
-            if not in_ul: out.append("<ul>"); in_ul = True
+            if not in_ul:
+                out.append("<ul>"); in_ul = True
             out.append(f"<li>{line[2:]}</li>")
         elif not line.strip():
             out.append("<br>")
@@ -201,7 +188,8 @@ def _simple_md_to_html(md: str) -> str:
             l = re.sub(r"\*(.+?)\*", r"<em>\1</em>", l)
             l = re.sub(r"`(.+?)`", r"<code>\1</code>", l)
             out.append(f"<p>{l}</p>")
-    if in_ul: out.append("</ul>")
+    if in_ul:
+        out.append("</ul>")
     return "\n".join(out)
 
 
@@ -209,7 +197,7 @@ def render_markdown_preview(md: str, output_dir: Path):
     if not md or not md.strip():
         st.warning("No content to preview.")
         return
-    components.html(_md_to_html(md, output_dir), height=920, scrolling=True)
+    st.iframe(_md_to_html(md, output_dir), height=920)
 
 
 # =============================================================================
@@ -265,7 +253,9 @@ with st.sidebar:
             options.append(label)
             file_by_label[label] = p
 
-        selected_label   = st.radio("", options=options, index=0, label_visibility="collapsed")
+        selected_label = st.radio(
+            "Select blog", options=options, index=0, label_visibility="collapsed"
+        )
         selected_md_file = file_by_label.get(selected_label) if selected_label else None
 
         if st.button("📖 Load selected blog", use_container_width=True):
@@ -282,9 +272,6 @@ if "last_out" not in st.session_state:
 if "logs" not in st.session_state:
     st.session_state["logs"] = []
 
-# ── Tabs — removed 🖼️ Images tab (IMAGE GENERATION commented out) ─────────────
-# To re-enable the Images tab, add "🖼️ Images" back to the list below
-# and uncomment the "── Images ──" section further down.
 tab_plan, tab_evidence, tab_preview, tab_logs = st.tabs(
     ["🧩 Plan", "🔎 Evidence", "📝 Preview", "🧾 Logs"]
 )
@@ -296,20 +283,18 @@ if run_btn:
         st.stop()
 
     inputs: Dict[str, Any] = {
-        "topic":      topic.strip(),
-        "mode":       "",
+        "topic":          topic.strip(),
+        "mode":           "",
         "needs_research": False,
-        "queries":    [],
-        "evidence":   [],
-        "plan":       None,
-        "as_of":      as_of.isoformat(),
-        "recency_days": 7,
-        "sections":   [],
-        "merged_md":  "",
-        # "image_specs":  [],   # IMAGE GENERATION — commented out
-        # "image_errors": [],   # IMAGE GENERATION — commented out
-        "output_dir": str(output_dir),
-        "final":      "",
+        "queries":        [],
+        "evidence":       [],
+        "plan":           None,
+        "as_of":          as_of.isoformat(),
+        "recency_days":   7,
+        "sections":       [],
+        "merged_md":      "",
+        "output_dir":     str(output_dir),
+        "final":          "",
     }
 
     st.session_state["logs"] = []
@@ -365,7 +350,7 @@ if out:
             c1, c2, c3 = st.columns(3)
             c1.metric("Audience", plan_dict.get("audience", "—"))
             c2.metric("Tone",     plan_dict.get("tone",     "—"))
-            c3.metric("Kind",     plan_dict.get("blog_kind","—"))
+            c3.metric("Kind",     plan_dict.get("blog_kind", "—"))
             tasks = plan_dict.get("tasks", [])
             if tasks:
                 df = pd.DataFrame([{
@@ -389,8 +374,12 @@ if out:
             rows = []
             for e in evidence:
                 e = e.model_dump() if hasattr(e, "model_dump") else e
-                rows.append({"title": e.get("title"), "published_at": e.get("published_at"),
-                             "source": e.get("source"), "url": e.get("url")})
+                rows.append({
+                    "title":        e.get("title"),
+                    "published_at": e.get("published_at"),
+                    "source":       e.get("source"),
+                    "url":          e.get("url"),
+                })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     # ── Preview ───────────────────────────────────────────────────────────────
@@ -420,41 +409,6 @@ if out:
             render_markdown_preview(final_md, output_dir)
             with st.expander("🔤 Raw Markdown"):
                 st.code(final_md, language="markdown")
-
-    # ── Images tab — IMAGE GENERATION COMMENTED OUT ───────────────────────────
-    # To re-enable:
-    #   1. Add "🖼️ Images" back to the st.tabs() call above
-    #   2. Add tab_images to the unpacking line above
-    #   3. Uncomment the block below
-    #   4. Uncomment image logic in backend.py
-    #
-    # with tab_images:
-    #     specs        = out.get("image_specs") or []
-    #     image_errors = out.get("image_errors") or []
-    #     images_dir   = output_dir / "images"
-    #     if image_errors:
-    #         for err in image_errors:
-    #             st.error(f"⚠️ {err}")
-    #         with st.expander("🔧 How to fix"):
-    #             st.markdown("""
-    # **pip install huggingface_hub pillow**
-    # Add to .env: `HF_TOKEN=hf_...` (free Read token from huggingface.co/settings/tokens)
-    # If model is loading (503): wait 20s and retry.
-    #             """)
-    #     if specs:
-    #         with st.expander("Image prompts & specs"):
-    #             st.json(specs)
-    #     if images_dir.exists():
-    #         files = sorted(p for p in images_dir.iterdir() if p.is_file())
-    #         if files:
-    #             cols = st.columns(min(len(files), 3))
-    #             for i, p in enumerate(files):
-    #                 with cols[i % 3]:
-    #                     st.image(str(p), caption=p.name, use_container_width=True)
-    #             z = images_zip(images_dir)
-    #             if z:
-    #                 st.download_button("⬇️ Download All Images", data=z,
-    #                                    file_name="images.zip", mime="application/zip")
 
     # ── Logs ──────────────────────────────────────────────────────────────────
     with tab_logs:
